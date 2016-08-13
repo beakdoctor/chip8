@@ -1,3 +1,4 @@
+#include <stdbool.h>
 #include <stdint.h>
 
 #define CHIP8_MEM_SIZE 4096
@@ -17,6 +18,7 @@ struct chip8 {
 	uint16_t stack[CHIP8_STACK_SIZE];
 	uint16_t sp;
 	uint8_t key[CHIP8_NUM_KEYS];
+	bool update_screen;
 };
 
 void init_state(struct chip8 *);
