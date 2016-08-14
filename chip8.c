@@ -4,9 +4,11 @@
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
+#include <unistd.h>
 #include "chip8.h"
 
-#define LOG(...) fprintf(stderr, __VA_ARGS__)
+#define DEBUG true
+#define LOG(...) if (DEBUG) fprintf(stderr, __VA_ARGS__)
 
 uint8_t fontset[80] =
 { 
@@ -28,13 +30,14 @@ uint8_t fontset[80] =
 	0xF0, 0x80, 0xF0, 0x80, 0x80  // F
 };
 
-
 void init_state(struct chip8 *state) {
 	srand(time(NULL));
 
 	state->pc = 0x200;
 	state->i = 0;
 	state->sp = 0;
+	state->st = 0;
+	state->dt = 0;
 
 	for (int i = 0; i < CHIP8_GFX_SIZE; i++) {
 		state->gfx[i] = 0;
@@ -53,7 +56,7 @@ void init_state(struct chip8 *state) {
 		state->mem[i] = fontset[i];
 	}
 
-	state->update_screen = true;
+	state->wait_for_input = false;
 }
 
 void load_rom(struct chip8 *state, char *path) {
@@ -68,15 +71,26 @@ void load_rom(struct chip8 *state, char *path) {
 
 void emulate_cycle(struct chip8 *state) {
 	uint16_t opcode = state->mem[state->pc] << 8 | state->mem[state->pc + 1];
+	LOG("PC: 0x%x, opcode: 0x%x - ", state->pc, opcode);
+	bool jmp = false;
 	switch(opcode & 0xf000) {
 		case 0x0000: 
 			if (opcode == 0x00e0) {
 				// 00E0 - CLS Clear the display..
-				LOG("0x%x: CLS\n", opcode);
+				LOG("CLS\n");
 				for (int i = 0; i < CHIP8_GFX_SIZE; i++) {
 					state->gfx[i] = 0;
 				}
 				state->update_screen = true;
+			} else if (opcode == 0x00ee) {
+				// 00EE - RET - Return from a subroutine. 
+				// The interpreter sets the program counter to the address at the top of the stack, then subtracts 1 from the stack pointer.
+				LOG("RET\n");
+				state->sp--;
+				state->pc = state->stack[state->sp];
+				jmp = true;
+			} else {
+				panic(state, opcode);
 			}
 			break;
 		case 0x1000:
@@ -84,9 +98,22 @@ void emulate_cycle(struct chip8 *state) {
 				// 1nnn - JP addr - Jump to location nnn.
 				// The interpreter sets the program counter to nnn.
 				uint16_t addr = opcode & 0x0fff;
-				LOG("0x%x: JP 0x%x\n", opcode, addr);
+				LOG("JP 0x%x\n", addr);
 				state->pc = addr;
-				goto end_cycle;
+				jmp = true;
+				break;
+			}
+		case 0x2000:
+			{
+				// 2nnn - CALL addr - Call subroutine at nnn.
+				// The interpreter increments the stack pointer, then puts the current PC on the top of the stack. The PC is then set to nnn.
+				uint16_t addr = opcode & 0x0fff;
+				LOG("CALL 0x%x\n", addr);
+				state->stack[state->sp] = state->pc + 2;
+				state->sp++;
+				state->pc = addr;
+				jmp = true;
+				break;
 			}
 		case 0x6000:
 			{
@@ -94,16 +121,38 @@ void emulate_cycle(struct chip8 *state) {
 				// The interpreter puts the value kk into register Vx.
 				uint8_t x = (opcode & 0x0f00) >> 8;
 				uint8_t byte = opcode & 0x00ff;
-				LOG("0x%x: LD V%d, 0x%x\n", opcode, x, byte);
+				LOG("LD V%d, 0x%x\n", x, byte);
 				state->v[x] = byte;
 				break;
 			}
+		case 0x7000:
+			{
+				// 7xkk - ADD Vx, byte - Set Vx = Vx + kk.
+				// Adds the value kk to the value of register Vx, then stores the result in Vx. 
+				uint8_t x = (opcode & 0x0f00) >> 8;
+				uint8_t byte = opcode & 0x00ff;
+				LOG("ADD V%d, 0x%x\n", x, byte);
+				state->v[x] += byte;
+				break;
+			}
+		case 0x8000:
+			if ((opcode & 0x000f) == 0) {
+				// 8xy0 - LD Vx, Vy - Set Vx = Vy.
+				// Stores the value of register Vy in register Vx.
+				uint8_t x = (opcode & 0x0f00) >> 8;
+				uint8_t y = (opcode & 0x00f0) >> 4;
+				LOG("LD V%d, V%d\n", x, y);
+				state->v[x] = state->v[y];
+			} else {
+				panic(state, opcode);
+			}
+			break;
 		case 0xa000:
 			{
 				// Annn - LD I, addr - Set I = nnn.
 				// The value of register I is set to nnn.
 				uint16_t addr = opcode & 0x0fff;
-				LOG("0x%x: LD I, 0x%x\n", opcode, addr);
+				LOG("LD I, 0x%x\n", addr);
 				state->i = addr;
 				break;
 			}
@@ -119,7 +168,21 @@ void emulate_cycle(struct chip8 *state) {
 				uint8_t x = (opcode & 0x0f00) >> 8;
 				uint8_t y = (opcode & 0x00f0) >> 4;
 				uint8_t n = opcode & 0x000f;
-				LOG("0x%x: DRW V%d, V%d, %d\n", opcode, x, y, n);
+				LOG("DRW V%d, V%d, %d\n", x, y, n);
+				state->v[0xf] = 0;
+				uint8_t vx = state->v[x];
+				uint8_t vy = state->v[y];
+				for (int byte = 0; byte < n; byte++) {
+					uint8_t line = state->mem[state->i + byte];
+					for (int pixel = 0; pixel < 8; pixel++) {
+						uint8_t old_value = state->gfx[(vy + byte) * CHIP8_SCREEN_WIDTH + (vx + pixel)];
+						uint8_t new_value = line & (0x80 >> pixel) ? 1 : 0; 
+						state->gfx[(vy + byte) * CHIP8_SCREEN_WIDTH + (vx + pixel)] = new_value;
+						if (old_value == 1 && new_value == 0) {
+							state->v[0xf] = 1;
+						}
+					}	
+				}
 				state->update_screen = true;
 				break;
 			}
@@ -130,7 +193,7 @@ void emulate_cycle(struct chip8 *state) {
 				// The results are stored in Vx.
 				uint8_t x = (opcode & 0x0f00) >> 8;
 				uint8_t byte = opcode & 0x00ff;
-				LOG("0x%x: RND V%d, 0x%x\n", opcode, x, byte);
+				LOG("RND V%d, 0x%x\n", x, byte);
 				uint8_t r = rand() & byte;
 				state->v[x] = r;
 				break;
@@ -138,55 +201,65 @@ void emulate_cycle(struct chip8 *state) {
 		case 0xf000:
 			{
 				uint8_t x = opcode & 0x0f00;
-				if ((opcode & 0x00ff) == 0x0a) {
+				if ((opcode & 0x00ff) == 0x07) {
+					// Fx15 - LD DT, Vx - Set delay timer = Vx.
+					// DT is set equal to the value of Vx.
+					uint8_t x = (opcode & 0x0f00) >> 8;
+					LOG("LD V%d, DT\n", x);
+					state->v[x] = state->dt;
+				} else if ((opcode & 0x00ff) == 0x15) {
+					// Fx15 - LD DT, Vx - Set delay timer = Vx.
+					// DT is set equal to the value of Vx.
+					uint8_t x = (opcode & 0x0f00) >> 8;
+					LOG("LD DT, V%d\n", x);
+					state->dt = state->v[x];
+				} else if ((opcode & 0x00ff) == 0x0a) {
 					// Fx0A - LD Vx, K - Wait for a key press, store the value of the key in Vx.
 					// All execution stops until a key is pressed, then the value of that key is stored in Vx.	
 					uint8_t x = (opcode & 0x0f00) >> 8;
-					LOG("0x%x: LD V%d, K\n", opcode, x);
-					break;
+					LOG("LD V%d, K\n", x);
+					state->wait_for_input = true;
 				} else if ((opcode & 0x00ff) == 0x29) {
 					// Fx29 - LD F, Vx - Set I = location of sprite for digit Vx.
 					// The value of I is set to the location for the hexadecimal sprite corresponding to the value of Vx.
 					uint8_t x = (opcode & 0x0f00) >> 8;
-					LOG("0x%x: LD F, V%d\n", opcode, x);
+					LOG("LD F, V%d\n", x);
 					state->i = state->v[x] * 5;
-					break;
 				} else if ((opcode & 0x00ff) == 0x33) {
 					// Fx33 - LD B, Vx - Store BCD representation of Vx in memory locations I, I+1, and I+2.
 					// The interpreter takes the decimal value of Vx, and places the hundreds 
 					// digit in memory at location in I, the tens digit at location I+1, 
 					// and the ones digit at location I+2.	
 					uint8_t x = (opcode & 0x0f00) >> 8;
-					LOG("0x%x: LD B, V%d\n", opcode, x);
+					LOG("LD B, V%d\n", x);
 					uint8_t vx = state->v[x];
-					uint8_t hundreds = vx / 100 % 100;
+					uint8_t hundreds = vx / 100;
 					uint8_t tens = vx % 100 / 10;
 					uint8_t ones = vx % 100 % 10;
 					uint16_t i = state->i;
 					state->mem[i] = hundreds;
 					state->mem[i + 1] = tens;
 					state->mem[i + 2] = ones;
-
-					break;
 				} else if ((opcode & 0x00ff) == 0x65) {
 					// Fx65 - LD Vx, [I] - Read registers V0 through Vx from memory starting at location I.
 					// The interpreter reads values from memory starting at location I into registers V0 through Vx.	
 					uint8_t x = (opcode & 0x0f00) >> 8;
-					LOG("0x%x: LD V%d, [I]\n", opcode, x);
-					for (int i = 0; i <= state->v[x]; i++) {
+					LOG("LD V%d, [I]\n", x);
+					for (int i = 0; i <= x; i++) {
 						state->v[i] = state->mem[state->i + i];
 					}
-					break;
+				} else {
+					panic(state, opcode);
 				}
+				break;
 			}
 		default:
-			LOG("Unknown opcode: 0x%x\n", opcode);
-			print_state(state);
-			exit(1);
+			panic(state, opcode);
 	}
-	state->pc += 2;
-end_cycle:
-	return;
+
+	if (!jmp) {
+		state->pc += 2;
+	}
 }
 
 void print_state(struct chip8 *state) {
@@ -199,4 +272,20 @@ void print_state(struct chip8 *state) {
 	for (int i = 0; i < CHIP8_STACK_SIZE; i++) {
 		LOG("stack[%d]: 0x%x\n", i, state->stack[i]);
 	}
+}
+
+void print_gfx(struct chip8 *state) {
+	for (int y = 0; y < CHIP8_SCREEN_HEIGHT; y++) {
+		for (int x = 0; x < CHIP8_SCREEN_WIDTH; x++) {
+			printf("%c", state->gfx[y * CHIP8_SCREEN_WIDTH + x] ? 'O' : '*');
+		}
+		printf("\n");
+	}
+	state->update_screen = false;
+}
+
+void panic(struct chip8 *state, uint16_t opcode) {
+	LOG("Unknown opcode: 0x%x\n", opcode);
+	print_state(state);
+	exit(1);
 }
