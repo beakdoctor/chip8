@@ -7,7 +7,7 @@
 #include <unistd.h>
 #include "chip8.h"
 
-#define DEBUG false
+#define DEBUG true
 #define LOG(...) if (DEBUG) fprintf(stderr, __VA_ARGS__)
 
 uint8_t fontset[80] =
@@ -191,7 +191,7 @@ void emulate_cycle(struct chip8 *state) {
 						LOG("AND V%d, V%d\n", x, y);
 						uint8_t old = state->v[x];
 						state->v[x] += state->v[y];
-						state->v[0xf] = state->v[x] < old;
+						state->v[0xf] = state->v[x] < old ? 1 : 0;
 					}
 					break;
 				case 0x5:
@@ -201,12 +201,24 @@ void emulate_cycle(struct chip8 *state) {
 						uint8_t x = (opcode & 0x0f00) >> 8;
 						uint8_t y = (opcode & 0x00f0) >> 4;
 						LOG("SUB V%d, V%d\n", x, y);
-						state->v[0xf] = state->v[x] > state->v[y];
+						state->v[0xf] = state->v[x] > state->v[y] ? 1 : 0;
 						state->v[x] -= state->v[y];
 					}
 					break;
 				default:
 					panic(state, opcode);
+			}
+			break;
+		case 0x9000:
+			{
+				// 9xy0 - SNE Vx, Vy - Skip next instruction if Vx != Vy.
+				// The values of Vx and Vy are compared, and if they are not equal, the program counter is increased by 2.
+				uint8_t x = (opcode & 0x0f00) >> 8;
+				uint8_t y = (opcode & 0x00f0) >> 4;
+				LOG("SNE V%d, V%d\n", x, y);
+				if (state->v[x] != state->v[y]) {
+					state->pc += 2;
+				}
 			}
 			break;
 		case 0xa000:
@@ -237,9 +249,11 @@ void emulate_cycle(struct chip8 *state) {
 				for (int byte = 0; byte < n; byte++) {
 					uint8_t line = state->mem[state->i + byte];
 					for (int pixel = 0; pixel < 8; pixel++) {
-						uint8_t old_value = state->gfx[(vy + byte) * CHIP8_SCREEN_WIDTH + (vx + pixel)];
+						uint16_t y_index = (vy + byte % CHIP8_SCREEN_HEIGHT) * CHIP8_SCREEN_WIDTH;
+						uint16_t x_index = vx + pixel % CHIP8_SCREEN_WIDTH;
+						uint8_t old_value = state->gfx[y_index + x_index];
 						uint8_t new_value = line & (0x80 >> pixel) ? 1 : 0; 
-						state->gfx[(vy + byte) * CHIP8_SCREEN_WIDTH + (vx + pixel)] ^= new_value;
+						state->gfx[y_index + x_index] ^= new_value;
 						if (old_value == 1 && new_value == 0) {
 							state->v[0xf] = 1;
 						}
@@ -265,7 +279,8 @@ void emulate_cycle(struct chip8 *state) {
 				case 0x9e:
 					{
 						// Ex9E - SKP Vx - Skip next instruction if key with the value of Vx is pressed.
-						// Checks the keyboard, and if the key corresponding to the value of Vx is currently in the down position, PC is increased by 2.
+						// Checks the keyboard, and if the key corresponding to the value of Vx is currently
+						// in the down position, PC is increased by 2.
 						uint8_t x = (opcode & 0x0f00) >> 8;
 						LOG("SKP V%d\n", x);
 						if (state->key[state->v[x]] == 1) {
@@ -276,7 +291,8 @@ void emulate_cycle(struct chip8 *state) {
 				case 0xa1:
 					{
 						// ExA1 - SKNP Vx - Skip next instruction if key with the value of Vx is not pressed.
-						// Checks the keyboard, and if the key corresponding to the value of Vx is currently in the up position, PC is increased by 2.
+						// Checks the keyboard, and if the key corresponding to the value of Vx is currently
+						// in the up position, PC is increased by 2.
 						uint8_t x = (opcode & 0x0f00) >> 8;
 						LOG("SKNP V%d\n", x);
 						if (state->key[state->v[x]] == 0) {
@@ -289,65 +305,106 @@ void emulate_cycle(struct chip8 *state) {
 			}
 			break;
 		case 0xf000:
-			{
-				uint8_t x = opcode & 0x0f00;
-				if ((opcode & 0x00ff) == 0x07) {
-					// Fx15 - LD DT, Vx - Set delay timer = Vx.
-					// DT is set equal to the value of Vx.
-					uint8_t x = (opcode & 0x0f00) >> 8;
-					LOG("LD V%d, DT\n", x);
-					state->v[x] = state->dt;
-				} else if ((opcode & 0x00ff) == 0x15) {
-					// Fx15 - LD DT, Vx - Set delay timer = Vx.
-					// DT is set equal to the value of Vx.
-					uint8_t x = (opcode & 0x0f00) >> 8;
-					LOG("LD DT, V%d\n", x);
-					state->dt = state->v[x];
-				} else if ((opcode & 0x00ff) == 0x18) {
-					// Fx18 - LD ST, Vx - Set sound timer = Vx.
-					uint8_t x = (opcode & 0x0f00) >> 8;
-					LOG("LD ST, V%d\n", x);
-					state->st = state->v[x];
-				} else if ((opcode & 0x00ff) == 0x0a) {
-					// Fx0A - LD Vx, K - Wait for a key press, store the value of the key in Vx.
-					// All execution stops until a key is pressed, then the value of that key is stored in Vx.	
-					uint8_t x = (opcode & 0x0f00) >> 8;
-					LOG("LD V%d, K\n", x);
-					state->wait_for_input = true;
-				} else if ((opcode & 0x00ff) == 0x29) {
-					// Fx29 - LD F, Vx - Set I = location of sprite for digit Vx.
-					// The value of I is set to the location for the hexadecimal sprite corresponding to the value of Vx.
-					uint8_t x = (opcode & 0x0f00) >> 8;
-					LOG("LD F, V%d\n", x);
-					state->i = state->v[x] * 5;
-				} else if ((opcode & 0x00ff) == 0x33) {
-					// Fx33 - LD B, Vx - Store BCD representation of Vx in memory locations I, I+1, and I+2.
-					// The interpreter takes the decimal value of Vx, and places the hundreds 
-					// digit in memory at location in I, the tens digit at location I+1, 
-					// and the ones digit at location I+2.	
-					uint8_t x = (opcode & 0x0f00) >> 8;
-					LOG("LD B, V%d\n", x);
-					uint8_t vx = state->v[x];
-					uint8_t hundreds = vx / 100;
-					uint8_t tens = vx % 100 / 10;
-					uint8_t ones = vx % 100 % 10;
-					uint16_t i = state->i;
-					state->mem[i] = hundreds;
-					state->mem[i + 1] = tens;
-					state->mem[i + 2] = ones;
-				} else if ((opcode & 0x00ff) == 0x65) {
-					// Fx65 - LD Vx, [I] - Read registers V0 through Vx from memory starting at location I.
-					// The interpreter reads values from memory starting at location I into registers V0 through Vx.	
-					uint8_t x = (opcode & 0x0f00) >> 8;
-					LOG("LD V%d, [I]\n", x);
-					for (int i = 0; i <= x; i++) {
-						state->v[i] = state->mem[state->i + i];
-					}
-				} else {
-					panic(state, opcode);
+				switch (opcode & 0x00ff) {
+					case 0x1e:
+						{
+							// Fx1E - ADD I, Vx - Set I = I + Vx.
+							// The values of I and Vx are added, and the results are stored in I.
+							uint8_t x = (opcode & 0x0f00) >> 8;
+							LOG("ADD I, V%d\n", x);
+							state->i += state->v[x];
+						}
+						break;
+					case 0x07:
+						{
+							// Fx15 - LD DT, Vx - Set delay timer = Vx.
+							// DT is set equal to the value of Vx.
+							uint8_t x = (opcode & 0x0f00) >> 8;
+							LOG("LD V%d, DT\n", x);
+							state->v[x] = state->dt;
+						}
+						break;
+					case 0x15:
+						{
+							// Fx15 - LD DT, Vx - Set delay timer = Vx.
+							// DT is set equal to the value of Vx.
+							uint8_t x = (opcode & 0x0f00) >> 8;
+							LOG("LD DT, V%d\n", x);
+							state->dt = state->v[x];
+						}
+						break;
+					case 0x18:
+						{
+							// Fx18 - LD ST, Vx - Set sound timer = Vx.
+							uint8_t x = (opcode & 0x0f00) >> 8;
+							LOG("LD ST, V%d\n", x);
+							state->st = state->v[x];
+						}
+						break;
+					case 0x0a:
+						{
+							// Fx0A - LD Vx, K - Wait for a key press, store the value of the key in Vx.
+							// All execution stops until a key is pressed, then the value of that key is stored in Vx.	
+							uint8_t x = (opcode & 0x0f00) >> 8;
+							LOG("LD V%d, K\n", x);
+							state->wait_for_input = true;
+						}
+						break;
+					case 0x29:
+						{
+							// Fx29 - LD F, Vx - Set I = location of sprite for digit Vx.
+							// The value of I is set to the location for the hexadecimal sprite corresponding to the value of Vx.
+							uint8_t x = (opcode & 0x0f00) >> 8;
+							LOG("LD F, V%d\n", x);
+							state->i = state->v[x] * 5;
+						}
+						break;
+					case 0x33:
+						{
+							// Fx33 - LD B, Vx - Store BCD representation of Vx in memory locations I, I+1, and I+2.
+							// The interpreter takes the decimal value of Vx, and places the hundreds 
+							// digit in memory at location in I, the tens digit at location I+1, 
+							// and the ones digit at location I+2.	
+							uint8_t x = (opcode & 0x0f00) >> 8;
+							LOG("LD B, V%d\n", x);
+							uint8_t vx = state->v[x];
+							uint8_t hundreds = vx / 100;
+							uint8_t tens = vx % 100 / 10;
+							uint8_t ones = vx % 100 % 10;
+							uint16_t i = state->i;
+							state->mem[i] = hundreds;
+							state->mem[i + 1] = tens;
+							state->mem[i + 2] = ones;
+						}
+						break;
+					case 0x55:
+						{
+							// Fx55 - LD [I], Vx - Store registers V0 through Vx in memory starting at location I.
+							// The interpreter copies the values of registers V0 through Vx into memory, starting at the address in I.
+							// I is set to I + X + 1 after operation.
+							uint8_t x = (opcode & 0x0f00) >> 8;
+							LOG("LD [I], V%d\n", x);
+							for (int i = 0; i <= x; i++) {
+								state->mem[state->i++] = state->v[i];
+							}
+						}
+						break;
+					case 0x65:
+						{
+							// Fx65 - LD Vx, [I] - Read registers V0 through Vx from memory starting at location I.
+							// The interpreter reads values from memory starting at location I into registers V0 through Vx.	
+							// I is set to I + X + 1 after operation.
+							uint8_t x = (opcode & 0x0f00) >> 8;
+							LOG("LD V%d, [I]\n", x);
+							for (int i = 0; i <= x; i++) {
+								state->v[i] = state->mem[state->i++];
+							}
+						}
+						break;
+					default:
+						panic(state, opcode);
 				}
 				break;
-			}
 		default:
 			panic(state, opcode);
 	}
