@@ -7,7 +7,7 @@
 #include <unistd.h>
 #include "chip8.h"
 
-#define DEBUG true
+#define DEBUG false
 #define LOG(...) if (DEBUG) fprintf(stderr, __VA_ARGS__)
 
 uint8_t fontset[80] =
@@ -113,8 +113,31 @@ void emulate_cycle(struct chip8 *state) {
 				state->sp++;
 				state->pc = addr;
 				jmp = true;
-				break;
 			}
+			break;
+		case 0x3000:
+			{
+				// 3XNN	- Skip the following instruction if the value of register VX equals NN
+				uint8_t x = (opcode & 0x0f00) >> 8;
+				uint8_t byte = opcode & 0x00ff;
+				LOG("SE V%d, 0x%x\n", x, byte);
+				if (state->v[x] == byte) {
+					state->pc += 2;
+				}
+			}
+			break;
+		case 0x4000:
+			{
+				// 4xkk - SNE Vx, byte - Skip next instruction if Vx != kk.
+				// The interpreter compares register Vx to kk, and if they are not equal, increments the program counter by 2.
+				uint8_t x = (opcode & 0x0f00) >> 8;
+				uint8_t byte = opcode & 0x00ff;
+				LOG("SNE V%d, 0x%x\n", x, byte);
+				if (state->v[x] != byte) {
+					state->pc += 2;
+				}
+			}
+			break;
 		case 0x6000:
 			{
 				// 6xkk - LD Vx, byte - Set Vx = kk.
@@ -136,15 +159,54 @@ void emulate_cycle(struct chip8 *state) {
 				break;
 			}
 		case 0x8000:
-			if ((opcode & 0x000f) == 0) {
-				// 8xy0 - LD Vx, Vy - Set Vx = Vy.
-				// Stores the value of register Vy in register Vx.
-				uint8_t x = (opcode & 0x0f00) >> 8;
-				uint8_t y = (opcode & 0x00f0) >> 4;
-				LOG("LD V%d, V%d\n", x, y);
-				state->v[x] = state->v[y];
-			} else {
-				panic(state, opcode);
+			switch (opcode & 0x000f) {
+				case 0x0:
+					{
+						// 8xy0 - LD Vx, Vy - Set Vx = Vy.
+						// Stores the value of register Vy in register Vx.
+						uint8_t x = (opcode & 0x0f00) >> 8;
+						uint8_t y = (opcode & 0x00f0) >> 4;
+						LOG("LD V%d, V%d\n", x, y);
+						state->v[x] = state->v[y];
+					}
+					break;
+				case 0x2:
+					{
+						// 8xy2 - AND Vx, Vy - Set Vx = Vx AND Vy.
+						// Performs a bitwise AND on the values of Vx and Vy, then stores the result in Vx.
+						uint8_t x = (opcode & 0x0f00) >> 8;
+						uint8_t y = (opcode & 0x00f0) >> 4;
+						LOG("AND V%d, V%d\n", x, y);
+						state->v[x] &= state->v[y];
+					}
+					break;
+				case 0x4:
+					{
+						// 8xy4 - ADD Vx, Vy - Set Vx = Vx + Vy, set VF = carry.
+						// The values of Vx and Vy are added together. If the result is greater than
+						// 8 bits (i.e., > 255,) VF is set to 1, otherwise 0. Only the lowest 8 bits
+						// of the result are kept, and stored in Vx.
+						uint8_t x = (opcode & 0x0f00) >> 8;
+						uint8_t y = (opcode & 0x00f0) >> 4;
+						LOG("AND V%d, V%d\n", x, y);
+						uint8_t old = state->v[x];
+						state->v[x] += state->v[y];
+						state->v[0xf] = state->v[x] < old;
+					}
+					break;
+				case 0x5:
+					{
+						// 8xy5 - SUB Vx, Vy - Set Vx = Vx - Vy, set VF = NOT borrow.
+						// If Vx > Vy, then VF is set to 1, otherwise 0. Then Vy is subtracted from Vx, and the results stored in Vx.
+						uint8_t x = (opcode & 0x0f00) >> 8;
+						uint8_t y = (opcode & 0x00f0) >> 4;
+						LOG("SUB V%d, V%d\n", x, y);
+						state->v[0xf] = state->v[x] > state->v[y];
+						state->v[x] -= state->v[y];
+					}
+					break;
+				default:
+					panic(state, opcode);
 			}
 			break;
 		case 0xa000:
@@ -154,8 +216,8 @@ void emulate_cycle(struct chip8 *state) {
 				uint16_t addr = opcode & 0x0fff;
 				LOG("LD I, 0x%x\n", addr);
 				state->i = addr;
-				break;
 			}
+			break;
 		case 0xd000:
 			{
 				// Display n-byte sprite starting at memory location I at (Vx, Vy), set VF = collision.
@@ -177,7 +239,7 @@ void emulate_cycle(struct chip8 *state) {
 					for (int pixel = 0; pixel < 8; pixel++) {
 						uint8_t old_value = state->gfx[(vy + byte) * CHIP8_SCREEN_WIDTH + (vx + pixel)];
 						uint8_t new_value = line & (0x80 >> pixel) ? 1 : 0; 
-						state->gfx[(vy + byte) * CHIP8_SCREEN_WIDTH + (vx + pixel)] = new_value;
+						state->gfx[(vy + byte) * CHIP8_SCREEN_WIDTH + (vx + pixel)] ^= new_value;
 						if (old_value == 1 && new_value == 0) {
 							state->v[0xf] = 1;
 						}
@@ -196,8 +258,36 @@ void emulate_cycle(struct chip8 *state) {
 				LOG("RND V%d, 0x%x\n", x, byte);
 				uint8_t r = rand() & byte;
 				state->v[x] = r;
-				break;
 			}
+			break;
+		case 0xe000:
+			switch (opcode & 0x00ff) {
+				case 0x9e:
+					{
+						// Ex9E - SKP Vx - Skip next instruction if key with the value of Vx is pressed.
+						// Checks the keyboard, and if the key corresponding to the value of Vx is currently in the down position, PC is increased by 2.
+						uint8_t x = (opcode & 0x0f00) >> 8;
+						LOG("SKP V%d\n", x);
+						if (state->key[state->v[x]] == 1) {
+							state->pc += 2;
+						}
+					}
+					break;
+				case 0xa1:
+					{
+						// ExA1 - SKNP Vx - Skip next instruction if key with the value of Vx is not pressed.
+						// Checks the keyboard, and if the key corresponding to the value of Vx is currently in the up position, PC is increased by 2.
+						uint8_t x = (opcode & 0x0f00) >> 8;
+						LOG("SKNP V%d\n", x);
+						if (state->key[state->v[x]] == 0) {
+							state->pc += 2;
+						}
+					}
+					break;
+				default:
+					panic(state, opcode);
+			}
+			break;
 		case 0xf000:
 			{
 				uint8_t x = opcode & 0x0f00;
@@ -213,6 +303,11 @@ void emulate_cycle(struct chip8 *state) {
 					uint8_t x = (opcode & 0x0f00) >> 8;
 					LOG("LD DT, V%d\n", x);
 					state->dt = state->v[x];
+				} else if ((opcode & 0x00ff) == 0x18) {
+					// Fx18 - LD ST, Vx - Set sound timer = Vx.
+					uint8_t x = (opcode & 0x0f00) >> 8;
+					LOG("LD ST, V%d\n", x);
+					state->st = state->v[x];
 				} else if ((opcode & 0x00ff) == 0x0a) {
 					// Fx0A - LD Vx, K - Wait for a key press, store the value of the key in Vx.
 					// All execution stops until a key is pressed, then the value of that key is stored in Vx.	
@@ -263,14 +358,16 @@ void emulate_cycle(struct chip8 *state) {
 }
 
 void print_state(struct chip8 *state) {
-	LOG("pc: 0x%x\n", state->pc);
-	LOG("i: 0x%x\n", state->i);
-	LOG("sp: 0x%x\n", state->sp);
+	fprintf(stderr, "pc: 0x%x\n", state->pc);
+	fprintf(stderr, "i: 0x%x\n", state->i);
+	fprintf(stderr, "sp: 0x%x\n", state->sp);
+	fprintf(stderr, "st: 0x%x\n", state->st);
+	fprintf(stderr, "dt: 0x%x\n", state->dt);
 	for (int i = 0; i < CHIP8_NUM_REGS; i++) {
-		LOG("v%d: 0x%x\n", i, state->v[i]);
+		fprintf(stderr, "v%d: 0x%x\n", i, state->v[i]);
 	}
 	for (int i = 0; i < CHIP8_STACK_SIZE; i++) {
-		LOG("stack[%d]: 0x%x\n", i, state->stack[i]);
+		fprintf(stderr, "stack[%d]: 0x%x\n", i, state->stack[i]);
 	}
 }
 
@@ -285,7 +382,7 @@ void print_gfx(struct chip8 *state) {
 }
 
 void panic(struct chip8 *state, uint16_t opcode) {
-	LOG("Unknown opcode: 0x%x\n", opcode);
+	fprintf(stderr, "Unknown opcode: 0x%x\n", opcode);
 	print_state(state);
 	exit(1);
 }
