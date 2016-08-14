@@ -8,9 +8,9 @@ int main(int argc, char **argv) {
 	SDL_Init(SDL_INIT_VIDEO);
  
 	SDL_Window *window = SDL_CreateWindow("SDL2 Pixel Drawing",
-			SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED, 640, 480, 0);
+			SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED, 640, 480, SDL_WINDOW_FULLSCREEN_DESKTOP);
  
-	SDL_Renderer *renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_ACCELERATED);
+	SDL_Renderer *renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_PRESENTVSYNC);
 	SDL_Texture *texture = SDL_CreateTexture(renderer,
 			SDL_PIXELFORMAT_ARGB8888,
 			SDL_TEXTUREACCESS_STATIC,
@@ -25,7 +25,7 @@ int main(int argc, char **argv) {
 
 	uint64_t cycles = 0;
 	// Used for the sound and delay timers.
-	uint32_t lastTime = SDL_GetTicks();
+	uint32_t last_event = SDL_GetTicks();
 	bool quit = false;	
 	while(!quit) {
 		if (state.wait_for_input) {
@@ -34,11 +34,10 @@ int main(int argc, char **argv) {
 					case SDL_KEYDOWN:
 						{
 							SDL_Keysym key = event.key.keysym;
-							if (key.sym == SDLK_a) {
-								printf("a pressed\n");
-							}
+							// TODO: set inputs
 							state.wait_for_input = false;
 						}
+						break;
 				}
 				if (!state.wait_for_input) {
 				   break;
@@ -51,16 +50,24 @@ int main(int argc, char **argv) {
 				case SDL_QUIT:
 					quit = true;
 					break;
+				case SDL_KEYDOWN:
+					{
+						SDL_Keysym key = event.key.keysym;
+						if (key.sym == SDLK_q) {
+							quit = true;
+						}
+					}
+					break;
 			}
 		}
 
 		// Handle timers
 		uint32_t ticks = SDL_GetTicks();
-		if (ticks - lastTime > 1000/60) {
+		if (ticks - last_event > 1000/60) {
 			cycles = 0;
 			if (state.st > 0) state.st--;
 			if (state.dt > 0) state.dt--;
-			lastTime = ticks;
+			last_event = ticks;
 		}
 
 		emulate_cycle(&state);
