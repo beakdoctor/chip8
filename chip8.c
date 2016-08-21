@@ -75,22 +75,30 @@ void emulate_cycle(struct chip8 *state) {
 	bool jmp = false;
 	switch(opcode & 0xf000) {
 		case 0x0000: 
-			if (opcode == 0x00e0) {
-				// 00E0 - CLS Clear the display..
-				LOG("CLS\n");
-				for (int i = 0; i < CHIP8_GFX_SIZE; i++) {
-					state->gfx[i] = 0;
-				}
-				state->update_screen = true;
-			} else if (opcode == 0x00ee) {
-				// 00EE - RET - Return from a subroutine. 
-				// The interpreter sets the program counter to the address at the top of the stack, then subtracts 1 from the stack pointer.
-				LOG("RET\n");
-				state->sp--;
-				state->pc = state->stack[state->sp];
-				jmp = true;
-			} else {
-				panic(state, opcode);
+			switch (opcode & 0x00ff)  {
+				case 0xe0:
+					{
+						// 00E0 - CLS Clear the display..
+						LOG("CLS\n");
+						for (int i = 0; i < CHIP8_GFX_SIZE; i++) {
+							state->gfx[i] = 0;
+						}
+						state->update_screen = true;
+					}
+					break;
+				case 0xee:
+					{
+						// 00EE - RET - Return from a subroutine. 
+						// The interpreter sets the program counter to the address at the top of the stack,
+						// then subtracts 1 from the stack pointer.
+						LOG("RET\n");
+						state->sp--;
+						state->pc = state->stack[state->sp];
+						jmp = true;
+					}
+					break;
+				default:
+					panic(state, opcode);
 			}
 			break;
 		case 0x1000:
@@ -106,7 +114,8 @@ void emulate_cycle(struct chip8 *state) {
 		case 0x2000:
 			{
 				// 2nnn - CALL addr - Call subroutine at nnn.
-				// The interpreter increments the stack pointer, then puts the current PC on the top of the stack. The PC is then set to nnn.
+				// The interpreter increments the stack pointer, then puts the current PC on the top of the stack.
+				// The PC is then set to nnn.
 				uint16_t addr = opcode & 0x0fff;
 				LOG("CALL 0x%x\n", addr);
 				state->stack[state->sp] = state->pc + 2;
